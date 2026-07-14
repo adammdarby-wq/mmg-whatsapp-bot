@@ -1,24 +1,29 @@
 // ================================================================
-// Modern Montessori Group - WhatsApp chatbot (Meta Cloud API)
+// Modern Montessori — WhatsApp chatbot (Meta Cloud API)
 //
-// Journey:
-//   greeting -> [School enrolment | Teacher training]
-//   enrolment -> [Linbro Park | Gillitts/Hillcrest] -> prospectus PDF
-//   training  -> WhatsApp Flow (multi-select study options + lead
-//               capture) -> matching prospectus PDFs -> thank you
-//   Fallback (no FLOW_ID): numbered multi-select via plain text.
+// Conversation:
+//   greeting -> [The School | The College]
+//   School  -> [Linbro Park | Gillitts/Hillcrest] -> 2 PDFs
+//              -> school lead questions -> end
+//   College -> multi-select courses (reply "1,3") -> PDFs for each
+//              -> combined blurb -> college lead questions
+//              -> appointment preference -> end
+//
+// All wording, fees, questions and course data live in content.js.
+// This file is the LOGIC only and rarely needs to change.
 // ================================================================
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const cfg = require("./config");
+const C = require("./content");
 
 const app = express();
 app.use(express.json());
 
 // Serve the bundled prospectus / application PDFs so WhatsApp can fetch
-// them by URL (BASE_URL/pdfs/<file>). No separate file hosting needed.
-// Works whether the PDFs sit in a ./pdfs folder or next to server.js.
+// them by URL (BASE_URL/pdfs/<file>). Works whether the PDFs sit in a
+// ./pdfs folder or next to server.js.
 const PDF_DIR = fs.existsSync(path.join(__dirname, "pdfs"))
   ? path.join(__dirname, "pdfs")
   : __dirname;
@@ -38,43 +43,10 @@ app.get("/pdfs/:name", (req, res) => {
 // ---------------------------------------------------------------
 // Conversation state (in-memory; swap for Redis in production)
 // ---------------------------------------------------------------
-const sessions = new Map(); // waNumber -> { state, data }
+const sessions = new Map();
 const getSession = (wa) => {
   if (!sessions.has(wa)) sessions.set(wa, { state: "NEW", data: {} });
   return sessions.get(wa);
-};
-
-// ---------------------------------------------------------------
-// Copy
-// ---------------------------------------------------------------
-const MSG = {
-  greeting:
-    "Thank you for contacting the Modern Montessori Group. How may we help you today?",
-  schoolQuestion: "Which school are you interested in?",
-  linbroThanks:
-    "Thank you. Please find attached the prospectus and application form for The School of Modern Montessori, Linbro Park.",
-  gillittsThanks:
-    "Thank you. Please find attached the prospectus and application form for The School of Modern Montessori, Gillitts / Hillcrest.",
-  studyIntro:
-    "Which study options are you interested in? You may select more than one.",
-  fallbackStudy:
-    "Which study options are you interested in? You may select more than one.\n\n" +
-    "1. Full-time\n2. Part-time\n3. Online\n4. Distance learning\n\n" +
-    "Please reply with the numbers, separated by commas (e.g. 1,3).",
-  leadAsk:
-    "Please may we have your name and email address so that one of our course consultants can follow up?\n\n" +
-    "Reply in the format: Jane Smith, jane@example.com",
-  leadThanks: (name) =>
-    `Thank you${name ? ", " + name.split(" ")[0] : ""}! One of our course consultants will be in touch shortly.`,
-  invalid:
-    "Sorry, I didn't understand that. Please use the buttons provided, or type *menu* to start again.",
-};
-
-const STUDY_OPTIONS = {
-  fulltime: "Full-time",
-  parttime: "Part-time",
-  online: "Online",
-  distance: "Distance learning",
 };
 
 // ---------------------------------------------------------------
@@ -88,11 +60,7 @@ async function waSend(payload) {
       Authorization: `Bearer ${cfg.WHATSAPP_TOKEN}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      recipient_type: "individual",
-      ...payload,
-    }),
+    body: JSON.stringify({ messaging_product: "whatsapp", recipient_type: "individual", ...payload }),
   });
   if (!res.ok) console.error("WA send failed:", res.status, await res.text());
 }
@@ -106,68 +74,43 @@ const sendButtons = (to, body, buttons) =>
     interactive: {
       type: "button",
       body: { text: body },
-      action: {
-        buttons: buttons.map((b) => ({
-          type: "reply",
-          reply: { id: b.id, title: b.title }, // title max 20 chars
-        })),
-      },
+      action: { buttons: buttons.map((b) => ({ type: "reply", reply: { id: b.id, title: b.title } })) },
     },
   });
 
-const sendDocument = (to, { url, filename }, caption) =>
-  waSend({
-    to,
-    type: "document",
-    document: { link: url, filename, ...(caption ? { caption } : {}) },
-  });
-
-const sendFlow = (to) =>
-  waSend({
-    to,
-    type: "interactive",
-    interactive: {
-      type: "flow",
-      body: { text: MSG.studyIntro },
-      action: {
-        name: "flow",
-        parameters: {
-          flow_message_version: "3",
-          flow_token: `mmg-${to}-${Date.now()}`,
-          flow_id: cfg.FLOW_ID,
-          flow_cta: "Choose options",
-          flow_action: "navigate",
-          flow_action_payload: { screen: "STUDY_OPTIONS" },
-        },
-      },
-    },
-  });
+const sendDocument = (to, { url, filename }) =>
+  waSend({ to, type: "document", document: { link: url, filename } });
 
 // ---------------------------------------------------------------
-// Lead storage (CSV + optional Google Sheets webhook)
+// Lead storage (Google Sheet webhook + CSV backup)
 // ---------------------------------------------------------------
-async function saveLead({ wa, name, email, options }) {
-  const csvPath = path.resolve(cfg.LEADS_CSV);
-  if (!fs.existsSync(csvPath))
-    fs.writeFileSync(csvPath, "timestamp,whatsapp,name,email,study_options\n");
-  const esc = (v) => `"${String(v || "").replace(/"/g, '""')}"`;
-  fs.appendFileSync(
-    csvPath,
-    [new Date().toISOString(), wa, name, email, options.join("; ")]
-      .map(esc)
-      .join(",") + "\n"
-  );
+async function saveLead({ to, sheetName, row, legacy }) {
+  // CSV backup (ephemeral on free hosting; the Google Sheet is the durable store)
+  try {
+    const csvPath = path.resolve(cfg.LEADS_CSV);
+    if (!fs.existsSync(csvPath)) fs.writeFileSync(csvPath, "timestamp,sheet,whatsapp,data\n");
+    const esc = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
+    fs.appendFileSync(
+      csvPath,
+      [new Date().toISOString(), sheetName, to, JSON.stringify(row)].map(esc).join(",") + "\n"
+    );
+  } catch (e) {
+    console.error("CSV save failed:", e.message);
+  }
+
   if (cfg.SHEETS_WEBHOOK_URL) {
     try {
       await fetch(cfg.SHEETS_WEBHOOK_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        // `sheet_name` + `row` drive the newer multi-tab Apps Script.
+        // The flat `legacy` fields keep the original 5-column script working too.
         body: JSON.stringify({
+          sheet_name: sheetName,
+          row,
           timestamp: new Date().toISOString(),
-          whatsapp: wa,
-          name,
-          email,
-          study_options: options.join("; "),
+          whatsapp: to,
+          ...legacy,
         }),
       });
     } catch (e) {
@@ -180,51 +123,128 @@ async function saveLead({ wa, name, email, options }) {
 // Journey steps
 // ---------------------------------------------------------------
 async function sendGreeting(to) {
-  getSession(to).state = "MAIN_MENU";
-  await sendButtons(to, MSG.greeting, [
-    { id: "enrolment", title: "School enrolment" },
-    { id: "training", title: "Teacher training" },
-  ]);
+  getSession(to).state = "MENU";
+  getSession(to).data = {};
+  await sendButtons(to, C.MESSAGES.greeting, C.BUTTONS.greeting);
 }
 
 async function sendSchoolMenu(to) {
-  getSession(to).state = "SCHOOL_MENU";
-  await sendButtons(to, MSG.schoolQuestion, [
-    { id: "school_linbro", title: "Linbro Park, Sandton" },
-    { id: "school_gillitts", title: "Gillitts / Hillcrest" },
-  ]);
+  getSession(to).state = "SCHOOL_SELECT";
+  await sendButtons(to, C.MESSAGES.schoolMenu, C.BUTTONS.school);
 }
 
-async function sendSchoolPack(to, school) {
-  const s = getSession(to);
-  s.state = "DONE";
-  await sendText(to, school === "linbro" ? MSG.linbroThanks : MSG.gillittsThanks);
-  for (const doc of cfg.PDFS[school]) await sendDocument(to, doc);
+async function sendCollegeMenu(to) {
+  getSession(to).state = "COLLEGE_SELECT";
+  await sendText(to, C.MESSAGES.collegeMenu);
 }
 
-async function startTraining(to) {
+// Start a lead-capture question sequence.
+async function beginCapture(to, flow, questions, base) {
   const s = getSession(to);
-  if (cfg.FLOW_ID) {
-    s.state = "AWAITING_FLOW";
-    await sendFlow(to);
-  } else {
-    s.state = "STUDY_FALLBACK";
-    await sendText(to, MSG.fallbackStudy);
+  s.state = "CAPTURE";
+  s.data.capture = { flow, questions, idx: 0, answers: {}, base };
+  await askNext(to);
+}
+
+// Ask the next (non-skipped) question, or finish the sequence.
+async function askNext(to) {
+  const s = getSession(to);
+  const cap = s.data.capture;
+  while (cap.idx < cap.questions.length) {
+    const q = cap.questions[cap.idx];
+    if (q.skipIf && q.skipIf(cap.answers)) {
+      cap.idx++;
+      continue;
+    }
+    return sendText(to, q.text);
   }
+  return finishCapture(to);
 }
 
-async function sendStudyPacks(to, optionKeys) {
-  await sendText(
+async function finishCapture(to) {
+  const s = getSession(to);
+  const cap = s.data.capture;
+  const a = cap.answers;
+  s.state = "DONE";
+
+  if (cap.flow === "school") {
+    const row = {
+      Timestamp: new Date().toISOString(),
+      WhatsApp: to,
+      School: cap.base.schoolName,
+      "Child name": a.child_name,
+      Gender: a.child_gender,
+      Age: a.child_age,
+      "Currently at another school": a.current_school,
+      "Preferred start": a.start_when,
+      Email: a.email,
+      "Wants appointment": a.wants_appointment,
+    };
+    await saveLead({
+      to,
+      sheetName: "School Leads",
+      row,
+      legacy: { name: a.child_name, email: a.email, study_options: cap.base.schoolName },
+    });
+    return sendText(to, C.MESSAGES.schoolEnd);
+  }
+
+  // college
+  const row = {
+    Timestamp: new Date().toISOString(),
+    WhatsApp: to,
+    "Courses selected": cap.base.coursesLabel,
+    Name: a.name,
+    Surname: a.surname,
+    Email: a.email,
+    "Courses of interest": a.courses_interested,
+    Location: a.location,
+    "Funding acknowledged": a.funding_acknowledged,
+    "Wants appointment": a.wants_appointment,
+    "Appointment preference": a.appointment_preference || "",
+  };
+  await saveLead({
     to,
-    "Thank you. Please find attached the prospectus" +
-      (optionKeys.length > 1 ? "es" : "") +
-      " for your selected study option" +
-      (optionKeys.length > 1 ? "s" : "") +
-      "."
-  );
-  for (const key of optionKeys) {
+    sheetName: "College Leads",
+    row,
+    legacy: {
+      name: [a.name, a.surname].filter(Boolean).join(" "),
+      email: a.email,
+      study_options: cap.base.coursesLabel,
+    },
+  });
+  return sendText(to, C.MESSAGES.collegeEnd);
+}
+
+async function startSchool(to, school) {
+  const s = getSession(to);
+  const isLinbro = school === "linbro";
+  await sendText(to, isLinbro ? C.MESSAGES.linbroThanks : C.MESSAGES.gillittsThanks);
+  for (const doc of cfg.PDFS[school]) await sendDocument(to, doc);
+  const schoolName = isLinbro
+    ? "Linbro Park, Sandton, Johannesburg"
+    : "Gillitts / Hillcrest, KZN";
+  await beginCapture(to, "school", C.SCHOOL_QUESTIONS, { schoolName, school });
+}
+
+async function startCollege(to, keys) {
+  // Send prospectus + application for every selected course.
+  for (const key of keys) {
     for (const doc of cfg.PDFS[key] || []) await sendDocument(to, doc);
   }
+  // One combined blurb matching the exact selection.
+  await sendText(to, C.courseBlurb(keys));
+  const coursesLabel = C.humanJoin(
+    C.COURSE_ORDER.filter((k) => keys.includes(k)).map((k) => C.COURSES[k].short)
+  );
+  await beginCapture(to, "college", C.COLLEGE_QUESTIONS, { keys, coursesLabel });
+}
+
+// Parse a numbered multi-select reply like "1, 3" -> ["fulltime","online"].
+function parseCourseSelection(text) {
+  const nums = (text.match(/[1-4]/g) || []).map((n) => Number(n));
+  const keys = [...new Set(nums)].map((n) => C.COURSE_ORDER[n - 1]).filter(Boolean);
+  return keys;
 }
 
 // ---------------------------------------------------------------
@@ -234,87 +254,44 @@ async function handleMessage(msg) {
   const to = msg.from;
   const s = getSession(to);
 
-  // --- Interactive replies -------------------------------------
   if (msg.type === "interactive") {
     const it = msg.interactive;
-
     if (it.type === "button_reply") {
       const id = it.button_reply.id;
-      if (id === "enrolment") return sendSchoolMenu(to);
-      if (id === "training") return startTraining(to);
-      if (id === "school_linbro") return sendSchoolPack(to, "linbro");
-      if (id === "school_gillitts") return sendSchoolPack(to, "gillitts");
+      if (id === "school") return sendSchoolMenu(to);
+      if (id === "college") return sendCollegeMenu(to);
+      if (id === "school_linbro") return startSchool(to, "linbro");
+      if (id === "school_gillitts") return startSchool(to, "gillitts");
     }
-
-    // WhatsApp Flow completion (study options + lead capture)
-    if (it.type === "nfm_reply") {
-      let data = {};
-      try {
-        data = JSON.parse(it.nfm_reply.response_json);
-      } catch (e) {
-        console.error("Bad flow response:", e.message);
-      }
-      const options = (data.study_options || []).filter(
-        (k) => STUDY_OPTIONS[k]
-      );
-      await sendStudyPacks(to, options);
-      await saveLead({
-        wa: to,
-        name: data.full_name || "",
-        email: data.email || "",
-        options: options.map((k) => STUDY_OPTIONS[k]),
-      });
-      s.state = "DONE";
-      return sendText(to, MSG.leadThanks(data.full_name));
-    }
-  }
-
-  // --- Text messages -------------------------------------------
-  if (msg.type === "text") {
-    const text = msg.text.body.trim();
-
-    if (/^(menu|hi|hello|start)$/i.test(text) || s.state === "NEW")
-      return sendGreeting(to);
-
-    // Fallback multi-select: "1,3"
-    if (s.state === "STUDY_FALLBACK") {
-      const keys = Object.keys(STUDY_OPTIONS);
-      const picked = [
-        ...new Set(
-          (text.match(/[1-4]/g) || []).map((n) => keys[Number(n) - 1])
-        ),
-      ];
-      if (!picked.length) return sendText(to, MSG.fallbackStudy);
-      s.data.options = picked;
-      await sendStudyPacks(to, picked);
-      s.state = "LEAD_CAPTURE";
-      return sendText(to, MSG.leadAsk);
-    }
-
-    // Fallback lead capture: "Name, email"
-    if (s.state === "LEAD_CAPTURE") {
-      const emailMatch = text.match(/[^\s,]+@[^\s,]+\.[^\s,]+/);
-      if (!emailMatch) return sendText(to, MSG.leadAsk);
-      const email = emailMatch[0];
-      const name = text
-        .replace(email, "")
-        .replace(/[,;]+/g, " ")
-        .trim();
-      await saveLead({
-        wa: to,
-        name,
-        email,
-        options: (s.data.options || []).map((k) => STUDY_OPTIONS[k]),
-      });
-      s.state = "DONE";
-      return sendText(to, MSG.leadThanks(name));
-    }
-
     return sendGreeting(to);
   }
 
-  // Anything else (media, stickers, etc.)
-  return sendText(to, MSG.invalid);
+  if (msg.type === "text") {
+    const text = (msg.text.body || "").trim();
+
+    if (/^(menu|hi|hello|start|good day|info|restart)$/i.test(text) || s.state === "NEW")
+      return sendGreeting(to);
+
+    if (s.state === "COLLEGE_SELECT") {
+      const keys = parseCourseSelection(text);
+      if (!keys.length) return sendText(to, C.MESSAGES.reprompt);
+      return startCollege(to, keys);
+    }
+
+    if (s.state === "CAPTURE") {
+      const cap = s.data.capture;
+      const q = cap.questions[cap.idx];
+      cap.answers[q.field] = text;
+      cap.idx++;
+      return askNext(to);
+    }
+
+    // MENU (awaiting a button tap) or DONE / anything else
+    if (s.state === "MENU") return sendText(to, C.MESSAGES.invalid);
+    return sendGreeting(to);
+  }
+
+  return sendText(to, C.MESSAGES.invalid);
 }
 
 // ---------------------------------------------------------------
@@ -322,20 +299,17 @@ async function handleMessage(msg) {
 // ---------------------------------------------------------------
 app.get("/webhook", (req, res) => {
   const { "hub.mode": mode, "hub.verify_token": token, "hub.challenge": challenge } = req.query;
-  if (mode === "subscribe" && token === cfg.VERIFY_TOKEN)
-    return res.status(200).send(challenge);
+  if (mode === "subscribe" && token === cfg.VERIFY_TOKEN) return res.status(200).send(challenge);
   res.sendStatus(403);
 });
 
 app.post("/webhook", (req, res) => {
-  res.sendStatus(200); // ack immediately
+  res.sendStatus(200);
   try {
     const changes = req.body.entry?.flatMap((e) => e.changes || []) || [];
     for (const c of changes) {
       for (const msg of c.value?.messages || []) {
-        handleMessage(msg).catch((err) =>
-          console.error("Handler error:", err)
-        );
+        handleMessage(msg).catch((err) => console.error("Handler error:", err));
       }
     }
   } catch (err) {
@@ -346,9 +320,7 @@ app.post("/webhook", (req, res) => {
 app.get("/", (_req, res) => res.send("MMG WhatsApp bot running"));
 
 if (require.main === module) {
-  app.listen(cfg.PORT, () =>
-    console.log(`MMG WhatsApp bot listening on port ${cfg.PORT}`)
-  );
+  app.listen(cfg.PORT, () => console.log(`MMG WhatsApp bot listening on port ${cfg.PORT}`));
 }
 
-module.exports = { app, handleMessage, sessions, _internal: { waSend } };
+module.exports = { app, handleMessage, sessions };
