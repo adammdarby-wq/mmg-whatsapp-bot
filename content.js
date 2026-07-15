@@ -42,16 +42,41 @@ const MESSAGES = {
     "3. Online Montessori Teacher Training\n" +
     "4. Distance Learning Montessori Course",
 
+  // Matric / equivalent gate (asked before any course info is sent)
+  matricPrompt: "Do you have matric or an equivalent qualification?",
+  matricIneligible:
+    "Regrettably, matric or an equivalent qualification is a requirement for entry onto the Full-time, Part-time and Online courses.\n\n" +
+    "That said, matric is not a requirement for the Distance Learning course. Distance Learning is a non-accredited course, can be started at any time, and allows up to three years for completion with tutor support.\n\n" +
+    "I will send you the Distance Learning information now.",
+
+  // Location prompts (only asked when Full-time and/or Part-time are chosen)
+  locFT: "The Full-time course takes place in Johannesburg only. Where do you live?",
+  locPT: "The Part-time course is offered in Johannesburg and Durban only. Where do you live?",
+  locBoth:
+    "The Full-time course is offered in Johannesburg only, and the Part-time course in Johannesburg and Durban only. Where do you live?",
+
+  // Location-based redirect messages
+  redirect_ftDurban:
+    "The Full-time course takes place in Johannesburg only.\n\n" +
+    "As you live in Durban, you may wish to consider the Part-time course, which is offered in Durban and Johannesburg.\n\n" +
+    "I will send you the Part-time course information now.",
+  redirect_ftOther:
+    "The Full-time course takes place in Johannesburg only.\n\n" +
+    "If you live in Durban, you may be able to do the Part-time course. If you live outside of Johannesburg and Durban, we suggest that you consider the Online course.\n\n" +
+    "I will send you the Online course information now.",
+  redirect_ptOther:
+    "The Part-time course is a face-to-face course offered in Johannesburg and Durban only.\n\n" +
+    "If you live outside of these areas, we suggest that you consider the Online course. The Online course is an accredited one-year course with live evening lectures and compulsory face-to-face/practicum attendance in either Johannesburg or Cape Town.\n\n" +
+    "I will send you the Online course information now.",
+
   collegeEnd:
     "Thank you. Your information has been received.\n\n" +
     "A member of our course advisory team will be in touch with you to answer your questions and, where applicable, arrange an appointment either in person, online or telephonically.\n\n" +
     "We look forward to assisting you on your Montessori journey.",
 
-  invalid:
-    "Sorry, I didn't quite catch that. Please reply using the options provided, or type *menu* to start again.",
-
-  reprompt:
-    "Please reply with the number(s) of the option(s) you'd like, separated by commas (for example: 1,3).",
+  invalid: "Sorry, I didn't quite catch that. Please reply using the options provided, or type *menu* to start again.",
+  reprompt: "Please reply with the number(s) of the option(s) you'd like, separated by commas (for example: 1,3).",
+  tapReprompt: "Please tap one of the buttons above to continue.",
 };
 
 // ---------------------------------------------------------------
@@ -66,19 +91,24 @@ const BUTTONS = {
     { id: "school_linbro", title: "Linbro Park" },
     { id: "school_gillitts", title: "Gillitts / Hillcrest" },
   ],
+  matric: [
+    { id: "matric_yes", title: "Yes" },
+    { id: "matric_no", title: "No" },
+  ],
+  location: [
+    { id: "loc_jhb", title: "Johannesburg" },
+    { id: "loc_durban", title: "Durban" },
+    { id: "loc_other", title: "Other" },
+  ],
 };
 
 // ---------------------------------------------------------------
 // 3. Courses — SINGLE SOURCE OF TRUTH.
 // Change a fee or detail here once and every blurb updates.
-// `single` = the polished blurb used when only this course is chosen.
-// `combo`  = one sentence used when building multi-course blurbs.
 // ---------------------------------------------------------------
 const COURSES = {
   fulltime: {
-    order: 1,
-    short: "Full-time",
-    fee: "R73,000",
+    order: 1, short: "Full-time", fee: "R73,000", accredited: true,
     single:
       "Thank you for your interest in our Full-time Montessori Teacher Training Course.\n\n" +
       "This is our most immersive option and is ideal if you are ready to commit to full-time study. The course runs for one year, starts in March, and lectures take place in Johannesburg only, at our Linbro Park, Sandton campus, on Mondays, Tuesdays and Thursdays from 08:30–14:30, with teaching practice from Term 2.\n\n" +
@@ -88,9 +118,7 @@ const COURSES = {
       "The Full-time course is a one-year accredited course starting in March, offered in Johannesburg only at our Linbro Park, Sandton campus, with weekday lectures (Mondays, Tuesdays and Thursdays) — our most immersive option.",
   },
   parttime: {
-    order: 2,
-    short: "Part-time",
-    fee: "R63,000",
+    order: 2, short: "Part-time", fee: "R63,000", accredited: true,
     single:
       "Thank you for your interest in our Part-time Montessori Teacher Training Course.\n\n" +
       "This option is ideal if you would like to study while still working or managing other commitments. The course runs for one year, starts in March, and lectures take place on Saturdays during term time.\n\n" +
@@ -100,9 +128,7 @@ const COURSES = {
       "The Part-time course is a one-year accredited course starting in March, offered in Johannesburg and Durban only, with lectures on Saturdays during term time — ideal if you are working or have other commitments.",
   },
   online: {
-    order: 3,
-    short: "Online",
-    fee: "R63,000",
+    order: 3, short: "Online", fee: "R63,000", accredited: true,
     single:
       "Thank you for your interest in our Online Montessori Teacher Training Course.\n\n" +
       "This option is ideal if you need more flexibility but still want an accredited qualification. The course runs for one year, starts in March, and lectures take place live online on Monday and Thursday evenings from 17:30–20:30.\n\n" +
@@ -112,9 +138,7 @@ const COURSES = {
       "The Online course is a one-year accredited course starting in March, with live evening lectures on Mondays and Thursdays (17:30–20:30) and compulsory face-to-face/practicum attendance in either Johannesburg or Cape Town — ideal if you need more flexibility.",
   },
   distance: {
-    order: 4,
-    short: "Distance Learning",
-    fee: "R23,000",
+    order: 4, short: "Distance Learning", fee: "R23,000", accredited: false,
     single:
       "Thank you for your interest in our Distance Learning Montessori Course.\n\n" +
       "This is our most flexible option and can be started at any time. Students receive up to three years to complete the course and are assigned a tutor for support.\n\n" +
@@ -125,14 +149,16 @@ const COURSES = {
   },
 };
 
-// Maps the reply number (from the college menu) to a course key.
 const COURSE_ORDER = ["fulltime", "parttime", "online", "distance"];
 
 // ---------------------------------------------------------------
 // 4. Lead-capture question sequences (edit / reorder freely).
 // `field` is the column name saved to your Google Sheet.
+// `skipIf(answers)` optionally skips a question.
 // ---------------------------------------------------------------
 const SCHOOL_QUESTIONS = [
+  { field: "parent_name", text: "What is the parent's name?" },
+  { field: "parent_surname", text: "What is the parent's surname?" },
   { field: "child_name", text: "What is the name of your child?" },
   { field: "child_gender", text: "Is your child male or female?" },
   { field: "child_age", text: "How old is your child?" },
@@ -143,11 +169,10 @@ const SCHOOL_QUESTIONS = [
 ];
 
 const COLLEGE_QUESTIONS = [
-  { field: "name", text: "What is your name?" },
-  { field: "surname", text: "What is your surname?" },
+  { field: "name_surname", text: "What is your name and surname?" },
   { field: "email", text: "What is your email address?" },
-  { field: "courses_interested", text: "Which course option or options are you most interested in?" },
-  { field: "location", text: "Where do you live?" },
+  // Skipped if we already learned their location from the Full-time/Part-time step.
+  { field: "location", text: "Where do you live?", skipIf: (a) => !!a.location },
   {
     field: "funding_acknowledged",
     text:
@@ -156,9 +181,7 @@ const COLLEGE_QUESTIONS = [
   { field: "wants_appointment", text: "Would you like to book an appointment to speak with us? (Yes / No)" },
   {
     field: "appointment_preference",
-    text:
-      "Would you prefer your appointment to be:\n\n1. In person at the college\n2. Online\n3. A phone call",
-    // Only asked if they said yes to booking an appointment.
+    text: "Would you prefer your appointment to be:\n\n1. In person at the college\n2. Online\n3. A phone call",
     skipIf: (a) => /^\s*(no|n|nope|not|nah)\b/i.test((a.wants_appointment || "").trim()),
   },
 ];
@@ -167,6 +190,7 @@ const COLLEGE_QUESTIONS = [
 // 5. Combined college blurb generator (handles ALL combinations).
 // ---------------------------------------------------------------
 function humanJoin(items) {
+  if (items.length === 0) return "";
   if (items.length === 1) return items[0];
   if (items.length === 2) return items[0] + " and " + items[1];
   return items.slice(0, -1).join(", ") + " and " + items[items.length - 1];
@@ -174,6 +198,7 @@ function humanJoin(items) {
 
 function courseBlurb(keys) {
   const ordered = COURSE_ORDER.filter((k) => keys.includes(k));
+  if (ordered.length === 0) return "";
   if (ordered.length === 1) return COURSES[ordered[0]].single;
 
   const names = ordered.map((k) => COURSES[k].short);

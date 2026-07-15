@@ -1,16 +1,13 @@
 // ================================================================
 // Modern Montessori — WhatsApp chatbot (Meta Cloud API)
 //
-// Conversation:
-//   greeting -> [The School | The College]
-//   School  -> [Linbro Park | Gillitts/Hillcrest] -> 2 PDFs
-//              -> school lead questions -> end
-//   College -> multi-select courses (reply "1,3") -> PDFs for each
-//              -> combined blurb -> college lead questions
-//              -> appointment preference -> end
+// Greeting -> [The School | The College]
+//   School  -> pick school -> 2 PDFs -> school lead questions -> end
+//   College -> pick course(s) -> MATRIC gate -> LOCATION check
+//              -> send only the final recommended PDFs + blurb/redirect
+//              -> college lead questions -> appointment -> end
 //
 // All wording, fees, questions and course data live in content.js.
-// This file is the LOGIC only and rarely needs to change.
 // ================================================================
 const express = require("express");
 const fs = require("fs");
@@ -21,12 +18,8 @@ const C = require("./content");
 const app = express();
 app.use(express.json());
 
-// Serve the bundled prospectus / application PDFs so WhatsApp can fetch
-// them by URL (BASE_URL/pdfs/<file>). Works whether the PDFs sit in a
-// ./pdfs folder or next to server.js.
-const PDF_DIR = fs.existsSync(path.join(__dirname, "pdfs"))
-  ? path.join(__dirname, "pdfs")
-  : __dirname;
+// --- serve bundled PDFs ----------------------------------------
+const PDF_DIR = fs.existsSync(path.join(__dirname, "pdfs")) ? path.join(__dirname, "pdfs") : __dirname;
 const PDF_FILES = new Set([
   "linbro-prospectus.pdf", "linbro-application.pdf",
   "gillitts-prospectus.pdf", "gillitts-application.pdf",
@@ -40,122 +33,133 @@ app.get("/pdfs/:name", (req, res) => {
   res.type("application/pdf").sendFile(path.join(PDF_DIR, req.params.name));
 });
 
-// ---------------------------------------------------------------
-// Conversation state (in-memory; swap for Redis in production)
-// ---------------------------------------------------------------
+// --- sessions ---------------------------------------------------
 const sessions = new Map();
 const getSession = (wa) => {
   if (!sessions.has(wa)) sessions.set(wa, { state: "NEW", data: {} });
   return sessions.get(wa);
 };
 
-// ---------------------------------------------------------------
-// WhatsApp Cloud API senders
-// ---------------------------------------------------------------
+// --- WhatsApp senders ------------------------------------------
 async function waSend(payload) {
   const url = `https://graph.facebook.com/${cfg.GRAPH_API_VERSION}/${cfg.PHONE_NUMBER_ID}/messages`;
   const res = await fetch(url, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${cfg.WHATSAPP_TOKEN}`,
-      "Content-Type": "application/json",
-    },
+    headers: { Authorization: `Bearer ${cfg.WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({ messaging_product: "whatsapp", recipient_type: "individual", ...payload }),
   });
   if (!res.ok) console.error("WA send failed:", res.status, await res.text());
 }
-
 const sendText = (to, body) => waSend({ to, type: "text", text: { body } });
-
 const sendButtons = (to, body, buttons) =>
   waSend({
-    to,
-    type: "interactive",
+    to, type: "interactive",
     interactive: {
-      type: "button",
-      body: { text: body },
+      type: "button", body: { text: body },
       action: { buttons: buttons.map((b) => ({ type: "reply", reply: { id: b.id, title: b.title } })) },
     },
   });
+const sendDocument = (to, { url, filename }) => waSend({ to, type: "document", document: { link: url, filename } });
 
-const sendDocument = (to, { url, filename }) =>
-  waSend({ to, type: "document", document: { link: url, filename } });
-
-// ---------------------------------------------------------------
-// Lead storage (Google Sheet webhook + CSV backup)
-// ---------------------------------------------------------------
+// --- lead storage ----------------------------------------------
 async function saveLead({ to, sheetName, row, legacy }) {
-  // CSV backup (ephemeral on free hosting; the Google Sheet is the durable store)
   try {
     const csvPath = path.resolve(cfg.LEADS_CSV);
     if (!fs.existsSync(csvPath)) fs.writeFileSync(csvPath, "timestamp,sheet,whatsapp,data\n");
     const esc = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
-    fs.appendFileSync(
-      csvPath,
-      [new Date().toISOString(), sheetName, to, JSON.stringify(row)].map(esc).join(",") + "\n"
-    );
-  } catch (e) {
-    console.error("CSV save failed:", e.message);
-  }
+    fs.appendFileSync(csvPath, [new Date().toISOString(), sheetName, to, JSON.stringify(row)].map(esc).join(",") + "\n");
+  } catch (e) { console.error("CSV save failed:", e.message); }
 
   if (cfg.SHEETS_WEBHOOK_URL) {
     try {
       await fetch(cfg.SHEETS_WEBHOOK_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // `sheet_name` + `row` drive the newer multi-tab Apps Script.
-        // The flat `legacy` fields keep the original 5-column script working too.
-        body: JSON.stringify({
-          sheet_name: sheetName,
-          row,
-          timestamp: new Date().toISOString(),
-          whatsapp: to,
-          ...legacy,
-        }),
+        body: JSON.stringify({ sheet_name: sheetName, row, timestamp: new Date().toISOString(), whatsapp: to, ...legacy }),
       });
-    } catch (e) {
-      console.error("Sheets webhook failed:", e.message);
-    }
+    } catch (e) { console.error("Sheets webhook failed:", e.message); }
   }
 }
 
-// ---------------------------------------------------------------
-// Journey steps
-// ---------------------------------------------------------------
-async function sendGreeting(to) {
-  getSession(to).state = "MENU";
-  getSession(to).data = {};
-  await sendButtons(to, C.MESSAGES.greeting, C.BUTTONS.greeting);
+// ================================================================
+// College decision engine — matric gate + location redirects.
+// Priority: matric first, then location.
+// ================================================================
+const ACCREDITED = ["fulltime", "parttime", "online"];
+
+function computeCollegeOutcome(selected, hasMatric, location) {
+  const sel = C.COURSE_ORDER.filter((k) => selected.includes(k));
+  const accreditedSel = sel.filter((k) => ACCREDITED.includes(k));
+
+  const finalSet = new Set();
+  const redirectTargets = new Set();
+  const rawNotes = []; // {target, msg} or {msg}
+  const reasons = [];
+
+  if (!hasMatric && accreditedSel.length) {
+    // Matric gate overrides everything -> Distance Learning only.
+    finalSet.add("distance");
+    redirectTargets.add("distance");
+    rawNotes.push({ msg: C.MESSAGES.matricIneligible });
+    reasons.push("No matric/equivalent → Distance Learning");
+  } else {
+    for (const k of sel) {
+      if (k === "fulltime") {
+        if (location === "durban") {
+          finalSet.add("parttime"); redirectTargets.add("parttime");
+          rawNotes.push({ target: "parttime", msg: C.MESSAGES.redirect_ftDurban });
+          reasons.push("Full-time → Part-time (Durban)");
+        } else if (location === "other") {
+          finalSet.add("online"); redirectTargets.add("online");
+          rawNotes.push({ target: "online", msg: C.MESSAGES.redirect_ftOther });
+          reasons.push("Full-time → Online (location outside Jhb/Durban)");
+        } else {
+          finalSet.add("fulltime");
+        }
+      } else if (k === "parttime") {
+        if (location === "other") {
+          finalSet.add("online"); redirectTargets.add("online");
+          rawNotes.push({ target: "online", msg: C.MESSAGES.redirect_ptOther });
+          reasons.push("Part-time → Online (location outside Jhb/Durban)");
+        } else {
+          finalSet.add("parttime");
+        }
+      } else if (k === "online") {
+        finalSet.add("online");
+      } else if (k === "distance") {
+        finalSet.add("distance");
+      }
+    }
+  }
+
+  // Dedupe redirect messages by target (avoid two "consider Online" notes).
+  const seen = new Set();
+  const notes = [];
+  for (const n of rawNotes) {
+    if (n.target) { if (seen.has(n.target)) continue; seen.add(n.target); }
+    notes.push(n.msg);
+  }
+
+  const finalArr = C.COURSE_ORDER.filter((k) => finalSet.has(k));
+  const keptForBlurb = finalArr.filter((k) => selected.includes(k) && !redirectTargets.has(k));
+
+  return {
+    finalArr,
+    notes,
+    keptForBlurb,
+    originalLabel: C.humanJoin(sel.map((k) => C.COURSES[k].short)),
+    finalLabel: C.humanJoin(finalArr.map((k) => C.COURSES[k].short)),
+    redirectReason: reasons.join("; "),
+  };
 }
 
-async function sendSchoolMenu(to) {
-  getSession(to).state = "SCHOOL_SELECT";
-  await sendButtons(to, C.MESSAGES.schoolMenu, C.BUTTONS.school);
-}
-
-async function sendCollegeMenu(to) {
-  getSession(to).state = "COLLEGE_SELECT";
-  await sendText(to, C.MESSAGES.collegeMenu);
-}
-
-// Start a lead-capture question sequence.
-async function beginCapture(to, flow, questions, base) {
-  const s = getSession(to);
-  s.state = "CAPTURE";
-  s.data.capture = { flow, questions, idx: 0, answers: {}, base };
-  await askNext(to);
-}
-
-// Ask the next (non-skipped) question, or finish the sequence.
+// --- generic question-sequence engine --------------------------
 async function askNext(to) {
   const s = getSession(to);
   const cap = s.data.capture;
   while (cap.idx < cap.questions.length) {
     const q = cap.questions[cap.idx];
-    if (q.skipIf && q.skipIf(cap.answers)) {
-      cap.idx++;
-      continue;
-    }
+    if (q.skipIf && q.skipIf(cap.answers)) { cap.idx++; continue; }
     return sendText(to, q.text);
   }
   return finishCapture(to);
@@ -169,124 +173,175 @@ async function finishCapture(to) {
 
   if (cap.flow === "school") {
     const row = {
-      Timestamp: new Date().toISOString(),
-      WhatsApp: to,
-      School: cap.base.schoolName,
-      "Child name": a.child_name,
-      Gender: a.child_gender,
-      Age: a.child_age,
-      "Currently at another school": a.current_school,
-      "Preferred start": a.start_when,
-      Email: a.email,
-      "Wants appointment": a.wants_appointment,
+      Timestamp: new Date().toISOString(), WhatsApp: to, School: cap.base.schoolName,
+      "Parent name": a.parent_name, "Parent surname": a.parent_surname,
+      "Child name": a.child_name, Gender: a.child_gender, Age: a.child_age,
+      "Currently at another school": a.current_school, "Preferred start": a.start_when,
+      Email: a.email, "Wants appointment": a.wants_appointment,
     };
     await saveLead({
-      to,
-      sheetName: "School Leads",
-      row,
-      legacy: { name: a.child_name, email: a.email, study_options: cap.base.schoolName },
+      to, sheetName: "School Leads", row,
+      legacy: { name: [a.parent_name, a.parent_surname].filter(Boolean).join(" "), email: a.email, study_options: cap.base.schoolName },
     });
     return sendText(to, C.MESSAGES.schoolEnd);
   }
 
   // college
   const row = {
-    Timestamp: new Date().toISOString(),
-    WhatsApp: to,
-    "Courses selected": cap.base.coursesLabel,
-    Name: a.name,
-    Surname: a.surname,
-    Email: a.email,
-    "Courses of interest": a.courses_interested,
-    Location: a.location,
+    Timestamp: new Date().toISOString(), WhatsApp: to,
+    "Name & surname": a.name_surname, Email: a.email, Location: a.location,
+    "Matric / equivalent": cap.base.matric,
+    "Courses selected": cap.base.originalLabel,
+    "Recommended path": cap.base.finalLabel,
+    "Redirect reason": cap.base.redirectReason,
     "Funding acknowledged": a.funding_acknowledged,
     "Wants appointment": a.wants_appointment,
     "Appointment preference": a.appointment_preference || "",
   };
   await saveLead({
-    to,
-    sheetName: "College Leads",
-    row,
-    legacy: {
-      name: [a.name, a.surname].filter(Boolean).join(" "),
-      email: a.email,
-      study_options: cap.base.coursesLabel,
-    },
+    to, sheetName: "College Leads", row,
+    legacy: { name: a.name_surname, email: a.email, study_options: cap.base.finalLabel },
   });
   return sendText(to, C.MESSAGES.collegeEnd);
 }
 
-async function startSchool(to, school) {
+// --- journey steps ---------------------------------------------
+async function sendGreeting(to) {
   const s = getSession(to);
+  s.state = "MENU"; s.data = {};
+  await sendButtons(to, C.MESSAGES.greeting, C.BUTTONS.greeting);
+}
+async function sendSchoolMenu(to) {
+  getSession(to).state = "SCHOOL_SELECT";
+  await sendButtons(to, C.MESSAGES.schoolMenu, C.BUTTONS.school);
+}
+async function sendCollegeMenu(to) {
+  const s = getSession(to);
+  s.state = "COLLEGE_SELECT"; s.data.college = {};
+  await sendText(to, C.MESSAGES.collegeMenu);
+}
+
+async function startSchool(to, school) {
   const isLinbro = school === "linbro";
   await sendText(to, isLinbro ? C.MESSAGES.linbroThanks : C.MESSAGES.gillittsThanks);
   for (const doc of cfg.PDFS[school]) await sendDocument(to, doc);
-  const schoolName = isLinbro
-    ? "Linbro Park, Sandton, Johannesburg"
-    : "Gillitts / Hillcrest, KZN";
-  await beginCapture(to, "school", C.SCHOOL_QUESTIONS, { schoolName, school });
+  const schoolName = isLinbro ? "Linbro Park, Sandton, Johannesburg" : "Gillitts / Hillcrest, KZN";
+  const s = getSession(to);
+  s.state = "CAPTURE";
+  s.data.capture = { flow: "school", questions: C.SCHOOL_QUESTIONS, idx: 0, answers: {}, base: { schoolName } };
+  await askNext(to);
 }
 
-async function startCollege(to, keys) {
-  // Send prospectus + application for every selected course.
-  for (const key of keys) {
-    for (const doc of cfg.PDFS[key] || []) await sendDocument(to, doc);
-  }
-  // One combined blurb matching the exact selection.
-  await sendText(to, C.courseBlurb(keys));
-  const coursesLabel = C.humanJoin(
-    C.COURSE_ORDER.filter((k) => keys.includes(k)).map((k) => C.COURSES[k].short)
-  );
-  await beginCapture(to, "college", C.COLLEGE_QUESTIONS, { keys, coursesLabel });
+// College: after course selection -> ask matric
+async function askMatric(to) {
+  getSession(to).state = "COLLEGE_MATRIC";
+  await sendButtons(to, C.MESSAGES.matricPrompt, C.BUTTONS.matric);
+}
+async function onMatric(to, hasMatric) {
+  const s = getSession(to);
+  const col = s.data.college || (s.data.college = {});
+  col.matric = hasMatric;
+  const selected = col.selected || [];
+  const accreditedSel = selected.filter((k) => ACCREDITED.includes(k));
+  if (!hasMatric && accreditedSel.length) return sendCollegeOutcome(to); // Distance-only redirect
+  if (hasMatric && (selected.includes("fulltime") || selected.includes("parttime"))) return askLocation(to);
+  return sendCollegeOutcome(to);
+}
+async function askLocation(to) {
+  const s = getSession(to);
+  const sel = s.data.college.selected || [];
+  const ft = sel.includes("fulltime"), pt = sel.includes("parttime");
+  const intro = ft && pt ? C.MESSAGES.locBoth : ft ? C.MESSAGES.locFT : C.MESSAGES.locPT;
+  s.state = "COLLEGE_LOCATION";
+  await sendButtons(to, intro, C.BUTTONS.location);
+}
+async function onLocation(to, loc) {
+  getSession(to).data.college.location = loc;
+  return sendCollegeOutcome(to);
 }
 
-// Parse a numbered multi-select reply like "1, 3" -> ["fulltime","online"].
+async function sendCollegeOutcome(to) {
+  const s = getSession(to);
+  const col = s.data.college;
+  const r = computeCollegeOutcome(col.selected || [], !!col.matric, col.location);
+
+  for (const note of r.notes) await sendText(to, note);
+  if (r.keptForBlurb.length) await sendText(to, C.courseBlurb(r.keptForBlurb));
+  for (const k of r.finalArr) for (const doc of cfg.PDFS[k] || []) await sendDocument(to, doc);
+
+  // Begin college lead capture, pre-filling what we already know.
+  const seed = {};
+  if (col.location) seed.location = { jhb: "Johannesburg", durban: "Durban", other: "Other (outside Jhb/Durban)" }[col.location];
+  s.state = "CAPTURE";
+  s.data.capture = {
+    flow: "college", questions: C.COLLEGE_QUESTIONS, idx: 0, answers: seed,
+    base: {
+      matric: col.matric ? "Yes" : "No",
+      originalLabel: r.originalLabel, finalLabel: r.finalLabel, redirectReason: r.redirectReason,
+    },
+  };
+  await askNext(to);
+}
+
+// --- parsers ----------------------------------------------------
 function parseCourseSelection(text) {
-  const nums = (text.match(/[1-4]/g) || []).map((n) => Number(n));
-  const keys = [...new Set(nums)].map((n) => C.COURSE_ORDER[n - 1]).filter(Boolean);
-  return keys;
+  const nums = (text.match(/[1-4]/g) || []).map(Number);
+  return [...new Set(nums)].map((n) => C.COURSE_ORDER[n - 1]).filter(Boolean);
+}
+const isYes = (t) => /^\s*(1|yes|y|yeah|yep)\b/i.test(t);
+const isNo = (t) => /^\s*(2|no|n|nope|nah)\b/i.test(t);
+function parseLocation(t) {
+  if (/(^|\b)(1|joburg|johannesburg|jhb|jozi|gauteng|pretoria)\b/i.test(t)) return "jhb";
+  if (/(^|\b)(2|durban|kzn|ballito|pinetown)\b/i.test(t)) return "durban";
+  if (/(^|\b)(3|other|elsewhere|another)\b/i.test(t)) return "other";
+  return null;
 }
 
-// ---------------------------------------------------------------
-// Incoming message handler
-// ---------------------------------------------------------------
+// --- incoming message handler ----------------------------------
 async function handleMessage(msg) {
   const to = msg.from;
   const s = getSession(to);
 
   if (msg.type === "interactive") {
-    const it = msg.interactive;
-    if (it.type === "button_reply") {
-      const id = it.button_reply.id;
-      if (id === "school") return sendSchoolMenu(to);
-      if (id === "college") return sendCollegeMenu(to);
-      if (id === "school_linbro") return startSchool(to, "linbro");
-      if (id === "school_gillitts") return startSchool(to, "gillitts");
-    }
+    const id = msg.interactive?.button_reply?.id;
+    if (id === "school") return sendSchoolMenu(to);
+    if (id === "college") return sendCollegeMenu(to);
+    if (id === "school_linbro") return startSchool(to, "linbro");
+    if (id === "school_gillitts") return startSchool(to, "gillitts");
+    if (id === "matric_yes") return onMatric(to, true);
+    if (id === "matric_no") return onMatric(to, false);
+    if (id === "loc_jhb") return onLocation(to, "jhb");
+    if (id === "loc_durban") return onLocation(to, "durban");
+    if (id === "loc_other") return onLocation(to, "other");
     return sendGreeting(to);
   }
 
   if (msg.type === "text") {
     const text = (msg.text.body || "").trim();
-
-    if (/^(menu|hi|hello|start|good day|info|restart)$/i.test(text) || s.state === "NEW")
-      return sendGreeting(to);
+    if (/^(menu|hi|hello|start|good day|info|restart)$/i.test(text) || s.state === "NEW") return sendGreeting(to);
 
     if (s.state === "COLLEGE_SELECT") {
       const keys = parseCourseSelection(text);
       if (!keys.length) return sendText(to, C.MESSAGES.reprompt);
-      return startCollege(to, keys);
+      s.data.college = { selected: keys };
+      return askMatric(to);
     }
-
+    if (s.state === "COLLEGE_MATRIC") {
+      if (isYes(text)) return onMatric(to, true);
+      if (isNo(text)) return onMatric(to, false);
+      return sendText(to, C.MESSAGES.tapReprompt);
+    }
+    if (s.state === "COLLEGE_LOCATION") {
+      const loc = parseLocation(text);
+      if (!loc) return sendText(to, C.MESSAGES.tapReprompt);
+      return onLocation(to, loc);
+    }
     if (s.state === "CAPTURE") {
       const cap = s.data.capture;
-      const q = cap.questions[cap.idx];
-      cap.answers[q.field] = text;
+      cap.answers[cap.questions[cap.idx].field] = text;
       cap.idx++;
       return askNext(to);
     }
-
-    // MENU (awaiting a button tap) or DONE / anything else
     if (s.state === "MENU") return sendText(to, C.MESSAGES.invalid);
     return sendGreeting(to);
   }
@@ -294,33 +349,23 @@ async function handleMessage(msg) {
   return sendText(to, C.MESSAGES.invalid);
 }
 
-// ---------------------------------------------------------------
-// Webhook endpoints
-// ---------------------------------------------------------------
+// --- webhook ----------------------------------------------------
 app.get("/webhook", (req, res) => {
   const { "hub.mode": mode, "hub.verify_token": token, "hub.challenge": challenge } = req.query;
   if (mode === "subscribe" && token === cfg.VERIFY_TOKEN) return res.status(200).send(challenge);
   res.sendStatus(403);
 });
-
 app.post("/webhook", (req, res) => {
   res.sendStatus(200);
   try {
     const changes = req.body.entry?.flatMap((e) => e.changes || []) || [];
-    for (const c of changes) {
-      for (const msg of c.value?.messages || []) {
+    for (const c of changes)
+      for (const msg of c.value?.messages || [])
         handleMessage(msg).catch((err) => console.error("Handler error:", err));
-      }
-    }
-  } catch (err) {
-    console.error("Webhook parse error:", err);
-  }
+  } catch (err) { console.error("Webhook parse error:", err); }
 });
-
 app.get("/", (_req, res) => res.send("MMG WhatsApp bot running"));
 
-if (require.main === module) {
-  app.listen(cfg.PORT, () => console.log(`MMG WhatsApp bot listening on port ${cfg.PORT}`));
-}
+if (require.main === module) app.listen(cfg.PORT, () => console.log(`MMG WhatsApp bot listening on port ${cfg.PORT}`));
 
-module.exports = { app, handleMessage, sessions };
+module.exports = { app, handleMessage, sessions, computeCollegeOutcome };
