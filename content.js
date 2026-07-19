@@ -31,7 +31,8 @@ const MESSAGES = {
 
   schoolEnd:
     "Thank you. Your information has been received.\n\n" +
-    "A member of our admissions team will be in touch with you to assist further and, where applicable, arrange an appointment for you to visit the school.",
+    "A member of our admissions team will be in touch with you to assist further and, where applicable, arrange an appointment for you to visit the school.\n\n" +
+    "If you'd prefer to speak to someone now, just reply *CALL* at any time.",
 
   collegeMenu:
     "Thank you for your interest in The College of Modern Montessori.\n\n" +
@@ -72,7 +73,8 @@ const MESSAGES = {
   collegeEnd:
     "Thank you. Your information has been received.\n\n" +
     "A member of our course advisory team will be in touch with you to answer your questions and, where applicable, arrange an appointment either in person, online or telephonically.\n\n" +
-    "We look forward to assisting you on your Montessori journey.",
+    "We look forward to assisting you on your Montessori journey.\n\n" +
+    "If you'd prefer to speak to someone now, just reply *CALL* at any time.",
 
   // Sent when the person has said YES to booking. {{link}} is replaced with
   // the correct Calendly link for their branch / age group / course.
@@ -86,6 +88,14 @@ const MESSAGES = {
   invalid: "Sorry, I didn't quite catch that. Please reply using the options provided, or type *menu* to start again.",
   reprompt: "Please reply with the number(s) of the option(s) you'd like, separated by commas (for example: 1,3).",
   tapReprompt: "Please tap one of the buttons above to continue.",
+
+  // --- Live call / callback hand-off ---
+  handoffPrompt:
+    "Of course — we'd be glad to speak with you. How would you like to connect?",
+  callNow:
+    "Here are our contact details — tap the card above and choose *Call* to reach us right away (over your own network, or as a WhatsApp call). We look forward to speaking with you.",
+  callbackDone:
+    "Thank you. We've logged your callback request and a member of our team will call you at the time you requested.",
 };
 
 // ---------------------------------------------------------------
@@ -109,7 +119,33 @@ const BUTTONS = {
     { id: "loc_durban", title: "Durban" },
     { id: "loc_other", title: "Other" },
   ],
+  handoff: [
+    { id: "call_now", title: "Call now" },
+    { id: "call_back", title: "Request callback" },
+  ],
 };
+
+// ---------------------------------------------------------------
+// Contact details used for the live-call hand-off (edit here).
+// phoneE164 / waId must be digits only (waId without the +).
+// ---------------------------------------------------------------
+const CONTACT = {
+  name: "Modern Montessori (Adam)",
+  firstName: "Adam",
+  display: "+27 82 896 6162",
+  phoneE164: "+27828966162",
+  waId: "27828966162",
+};
+
+// Whole-word / phrase triggers for "I'd like to speak to a person".
+const HANDOFF_RE =
+  /(call me|call back|call you|phone me|phone you|speak to (someone|a|an|you)|talk to (someone|a|an|you)|speak with|a real person|a human|an agent|live agent|customer service|help ?desk|can i call|want to (call|speak|talk)|your (phone )?number|contact number)/i;
+
+function wantsHandoff(text) {
+  const t = String(text || "").trim().toLowerCase();
+  if (["call", "callback", "call back", "phone", "agent", "human", "call now", "speak", "talk"].includes(t)) return true;
+  return HANDOFF_RE.test(t);
+}
 
 // ---------------------------------------------------------------
 // 3. Courses — SINGLE SOURCE OF TRUTH.
@@ -250,6 +286,13 @@ const COLLEGE_QUESTIONS = [
   },
 ];
 
+// Questions asked when someone requests a callback.
+const CALLBACK_QUESTIONS = [
+  { field: "callback_name", text: "No problem — who should we ask for? (your name)" },
+  { field: "callback_number", text: "What's the best number to call you on?" },
+  { field: "callback_time", text: "And what day and time would suit you best for the call?" },
+];
+
 // ---------------------------------------------------------------
 // 5. Combined college blurb generator (handles ALL combinations).
 // ---------------------------------------------------------------
@@ -283,11 +326,14 @@ module.exports = {
   COURSES,
   COURSE_ORDER,
   CALENDLY,
+  CONTACT,
   SCHOOL_QUESTIONS,
   COLLEGE_QUESTIONS,
+  CALLBACK_QUESTIONS,
   courseBlurb,
   humanJoin,
   parseChildAge,
   schoolBookingUrl,
   collegeBookingUrl,
+  wantsHandoff,
 };

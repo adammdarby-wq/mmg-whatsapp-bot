@@ -60,6 +60,17 @@ const sendButtons = (to, body, buttons) =>
     },
   });
 const sendDocument = (to, { url, filename }) => waSend({ to, type: "document", document: { link: url, filename } });
+const sendContact = (to, c) =>
+  waSend({
+    to,
+    type: "contacts",
+    contacts: [
+      {
+        name: { formatted_name: c.name, first_name: c.firstName },
+        phones: [{ phone: c.phoneE164, type: "CELL", wa_id: c.waId }],
+      },
+    ],
+  });
 
 // --- lead storage ----------------------------------------------
 async function saveLead({ to, sheetName, row, legacy }) {
@@ -202,6 +213,18 @@ async function finishCapture(to) {
   const a = cap.answers;
   s.state = "DONE";
 
+  if (cap.flow === "callback") {
+    const row = {
+      Timestamp: new Date().toISOString(), WhatsApp: to,
+      Name: a.callback_name, "Call on number": a.callback_number, "Preferred time": a.callback_time,
+    };
+    await saveLead({
+      to, sheetName: "Callback Requests", row,
+      legacy: { name: a.callback_name, email: "", study_options: "Callback request" },
+    });
+    return sendText(to, C.MESSAGES.callbackDone);
+  }
+
   if (cap.flow === "school") {
     const wantsAppt = isYes(a.wants_appointment);
     const bookingUrl = wantsAppt ? C.schoolBookingUrl(cap.base.school, a.child_age) : "";
@@ -268,6 +291,21 @@ async function startSchool(to, school) {
   const s = getSession(to);
   s.state = "CAPTURE";
   s.data.capture = { flow: "school", questions: C.SCHOOL_QUESTIONS, idx: 0, answers: {}, base: { schoolName, school } };
+  await askNext(to);
+}
+
+// --- live call / callback hand-off -----------------------------
+async function offerHandoff(to) {
+  await sendButtons(to, C.MESSAGES.handoffPrompt, C.BUTTONS.handoff);
+}
+async function sendCallNow(to) {
+  await sendContact(to, C.CONTACT);
+  await sendText(to, C.MESSAGES.callNow);
+}
+async function startCallback(to) {
+  const s = getSession(to);
+  s.state = "CAPTURE";
+  s.data.capture = { flow: "callback", questions: C.CALLBACK_QUESTIONS, idx: 0, answers: {}, base: {} };
   await askNext(to);
 }
 
@@ -353,11 +391,16 @@ async function handleMessage(msg) {
     if (id === "loc_jhb") return onLocation(to, "jhb");
     if (id === "loc_durban") return onLocation(to, "durban");
     if (id === "loc_other") return onLocation(to, "other");
+    if (id === "call_now") return sendCallNow(to);
+    if (id === "call_back") return startCallback(to);
     return sendGreeting(to);
   }
 
   if (msg.type === "text") {
     const text = (msg.text.body || "").trim();
+    // "Talk to a person" can be requested at any time (except mid-callback capture).
+    if (C.wantsHandoff(text) && !(s.state === "CAPTURE" && s.data.capture && s.data.capture.flow === "callback"))
+      return offerHandoff(to);
     if (/^(menu|hi|hello|start|good day|info|restart)$/i.test(text) || s.state === "NEW") return sendGreeting(to);
 
     if (s.state === "COLLEGE_SELECT") {
