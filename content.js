@@ -74,6 +74,15 @@ const MESSAGES = {
     "A member of our course advisory team will be in touch with you to answer your questions and, where applicable, arrange an appointment either in person, online or telephonically.\n\n" +
     "We look forward to assisting you on your Montessori journey.",
 
+  // Sent when the person has said YES to booking. {{link}} is replaced with
+  // the correct Calendly link for their branch / age group / course.
+  appointmentSchool:
+    "Wonderful! You can book your visit to the school here:\n\n{{link}}\n\n" +
+    "Just choose any time that suits you and you'll receive a confirmation with all the details. We look forward to welcoming you.",
+  appointmentCollege:
+    "Wonderful! You can book your appointment here:\n\n{{link}}\n\n" +
+    "Just choose any time that suits you and you'll receive a confirmation with all the details. We look forward to assisting you on your Montessori journey.",
+
   invalid: "Sorry, I didn't quite catch that. Please reply using the options provided, or type *menu* to start again.",
   reprompt: "Please reply with the number(s) of the option(s) you'd like, separated by commas (for example: 1,3).",
   tapReprompt: "Please tap one of the buttons above to continue.",
@@ -152,6 +161,61 @@ const COURSES = {
 const COURSE_ORDER = ["fulltime", "parttime", "online", "distance"];
 
 // ---------------------------------------------------------------
+// 3b. Calendly booking links — SINGLE SOURCE OF TRUTH.
+// If you ever rename a Calendly event link (slug), update it here
+// (only the part after calendly.com/modmont/).
+// ---------------------------------------------------------------
+const CALENDLY = {
+  base: "https://calendly.com/modmont/",
+  school: {
+    linbroBabyToddler: "linbro-baby-toddler-0-3",   // ages 0–3
+    linbroTreeHouse: "school-linbro-tree-house-3-6", // ages 3–6
+    linbroElementary: "linbro-elementary-6-12",      // ages 6–12
+    gillitts: "gillitts-hillcrest",                  // Gillitts (any age)
+  },
+  college: {
+    faceToFace: "college-face-to-face",              // in person, Joburg
+    online: "college-online-zoom",                   // online, Zoom
+    distance: "distance-learning-15-min-call",       // 15-min phone call
+  },
+};
+
+// Parse a child's age in YEARS from free text ("3", "5 years", "18 months").
+function parseChildAge(text) {
+  if (!text) return null;
+  const t = String(text).toLowerCase();
+  const m = t.match(/(\d+(?:[.,]\d+)?)/);
+  if (!m) return null;
+  let n = parseFloat(m[1].replace(",", "."));
+  if (/month/.test(t)) n = n / 12; // "18 months" -> 1.5 years
+  return isNaN(n) ? null : n;
+}
+
+// School: pick the Calendly event by branch + child age.
+function schoolBookingUrl(school, childAgeText) {
+  if (school === "gillitts") return CALENDLY.base + CALENDLY.school.gillitts;
+  const age = parseChildAge(childAgeText);
+  let key;
+  if (age == null) key = "linbroTreeHouse";     // sensible default if unclear
+  else if (age < 3) key = "linbroBabyToddler";
+  else if (age < 6) key = "linbroTreeHouse";
+  else key = "linbroElementary";
+  return CALENDLY.base + CALENDLY.school[key];
+}
+
+// College: pick by recommended path + preference (1 in person / 2 online / 3 phone).
+function collegeBookingUrl(finalArr, preference) {
+  // A Distance-only recommendation can only be the 15-minute phone call.
+  if (Array.isArray(finalArr) && finalArr.length === 1 && finalArr[0] === "distance")
+    return CALENDLY.base + CALENDLY.college.distance;
+  const p = String(preference || "").trim();
+  if (/(^|\b)(1|in.?person|campus|face)/i.test(p)) return CALENDLY.base + CALENDLY.college.faceToFace;
+  if (/(^|\b)(2|online|zoom|virtual)/i.test(p)) return CALENDLY.base + CALENDLY.college.online;
+  if (/(^|\b)(3|phone|call|tele)/i.test(p)) return CALENDLY.base + CALENDLY.college.distance;
+  return CALENDLY.base + CALENDLY.college.faceToFace; // default
+}
+
+// ---------------------------------------------------------------
 // 4. Lead-capture question sequences (edit / reorder freely).
 // `field` is the column name saved to your Google Sheet.
 // `skipIf(answers)` optionally skips a question.
@@ -218,8 +282,12 @@ module.exports = {
   BUTTONS,
   COURSES,
   COURSE_ORDER,
+  CALENDLY,
   SCHOOL_QUESTIONS,
   COLLEGE_QUESTIONS,
   courseBlurb,
   humanJoin,
+  parseChildAge,
+  schoolBookingUrl,
+  collegeBookingUrl,
 };

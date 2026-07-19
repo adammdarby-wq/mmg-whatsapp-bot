@@ -172,21 +172,27 @@ async function finishCapture(to) {
   s.state = "DONE";
 
   if (cap.flow === "school") {
+    const wantsAppt = isYes(a.wants_appointment);
+    const bookingUrl = wantsAppt ? C.schoolBookingUrl(cap.base.school, a.child_age) : "";
     const row = {
       Timestamp: new Date().toISOString(), WhatsApp: to, School: cap.base.schoolName,
       "Parent name": a.parent_name, "Parent surname": a.parent_surname,
       "Child name": a.child_name, Gender: a.child_gender, Age: a.child_age,
       "Currently at another school": a.current_school, "Preferred start": a.start_when,
       Email: a.email, "Wants appointment": a.wants_appointment,
+      "Booking link": bookingUrl,
     };
     await saveLead({
       to, sheetName: "School Leads", row,
       legacy: { name: [a.parent_name, a.parent_surname].filter(Boolean).join(" "), email: a.email, study_options: cap.base.schoolName },
     });
+    if (wantsAppt) return sendText(to, C.MESSAGES.appointmentSchool.replace("{{link}}", bookingUrl));
     return sendText(to, C.MESSAGES.schoolEnd);
   }
 
   // college
+  const wantsAppt = isYes(a.wants_appointment);
+  const bookingUrl = wantsAppt ? C.collegeBookingUrl(cap.base.finalArr, a.appointment_preference) : "";
   const row = {
     Timestamp: new Date().toISOString(), WhatsApp: to,
     "Name & surname": a.name_surname, Email: a.email, Location: a.location,
@@ -197,11 +203,13 @@ async function finishCapture(to) {
     "Funding acknowledged": a.funding_acknowledged,
     "Wants appointment": a.wants_appointment,
     "Appointment preference": a.appointment_preference || "",
+    "Booking link": bookingUrl,
   };
   await saveLead({
     to, sheetName: "College Leads", row,
     legacy: { name: a.name_surname, email: a.email, study_options: cap.base.finalLabel },
   });
+  if (wantsAppt) return sendText(to, C.MESSAGES.appointmentCollege.replace("{{link}}", bookingUrl));
   return sendText(to, C.MESSAGES.collegeEnd);
 }
 
@@ -228,7 +236,7 @@ async function startSchool(to, school) {
   const schoolName = isLinbro ? "Linbro Park, Sandton, Johannesburg" : "Gillitts / Hillcrest, KZN";
   const s = getSession(to);
   s.state = "CAPTURE";
-  s.data.capture = { flow: "school", questions: C.SCHOOL_QUESTIONS, idx: 0, answers: {}, base: { schoolName } };
+  s.data.capture = { flow: "school", questions: C.SCHOOL_QUESTIONS, idx: 0, answers: {}, base: { schoolName, school } };
   await askNext(to);
 }
 
@@ -278,6 +286,7 @@ async function sendCollegeOutcome(to) {
     base: {
       matric: col.matric ? "Yes" : "No",
       originalLabel: r.originalLabel, finalLabel: r.finalLabel, redirectReason: r.redirectReason,
+      finalArr: r.finalArr,
     },
   };
   await askNext(to);
