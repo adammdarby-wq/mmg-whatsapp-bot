@@ -1,4 +1,5 @@
 # Modern Montessori Group — WhatsApp Chatbot
+<!-- auto-deploy check: 2026-07-19 -->
 
 A complete WhatsApp chatbot for the number **+27 78 255 8159**, built on the official **Meta WhatsApp Cloud API**. The 12 prospectus and application PDFs are bundled inside the app and served automatically, so there is nothing else to host.
 
