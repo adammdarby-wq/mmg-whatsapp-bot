@@ -61,5 +61,13 @@ module.exports = {
   // Optional: Google Apps Script web-app URL to append leads to a Google Sheet
   SHEETS_WEBHOOK_URL: process.env.SHEETS_WEBHOOK_URL || "",
 
+  // Calendly -> Google Sheet booking sync (see /calendly endpoint).
+  // Shared secret: set the same value here and in the ?key= of the Calendly
+  // webhook callback URL, so only Calendly can post to /calendly.
+  // Leave empty to disable the check (not recommended in production).
+  CALENDLY_WEBHOOK_SECRET: process.env.CALENDLY_WEBHOOK_SECRET || "",
+  // Tab name that completed bookings are written to.
+  BOOKINGS_SHEET: process.env.BOOKINGS_SHEET || "Bookings",
+
   PORT: process.env.PORT || 3000,
 };

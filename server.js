@@ -81,6 +81,37 @@ async function saveLead({ to, sheetName, row, legacy }) {
   }
 }
 
+// --- Calendly booking sync -------------------------------------
+// Write one row per booking to the "Bookings" tab of the Google Sheet.
+async function postBooking(row) {
+  if (!cfg.SHEETS_WEBHOOK_URL) return;
+  try {
+    await fetch(cfg.SHEETS_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sheet_name: cfg.BOOKINGS_SHEET, row, timestamp: new Date().toISOString() }),
+    });
+  } catch (e) { console.error("Bookings webhook failed:", e.message); }
+}
+
+// Format an ISO time in South African local time for the sheet.
+function toSAST(iso) {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toLocaleString("en-ZA", {
+      timeZone: "Africa/Johannesburg", dateStyle: "medium", timeStyle: "short",
+    });
+  } catch (_) { return iso; }
+}
+
+// Calendly's location object -> readable string (address / Zoom link / phone).
+function fmtLocation(loc) {
+  if (!loc) return "";
+  if (typeof loc === "string") return loc;
+  const detail = loc.location || loc.join_url || loc.additional_info || "";
+  return [loc.type, detail].filter(Boolean).join(": ");
+}
+
 // ================================================================
 // College decision engine — matric gate + location redirects.
 // Priority: matric first, then location.
@@ -373,8 +404,82 @@ app.post("/webhook", (req, res) => {
         handleMessage(msg).catch((err) => console.error("Handler error:", err));
   } catch (err) { console.error("Webhook parse error:", err); }
 });
+// --- Calendly webhook: completed / cancelled bookings -> sheet --
+async function handleCalendlyEvent(body) {
+  const evt = body?.event || "";
+  const p = body?.payload || {};
+  const se = p.scheduled_event || {};
+  const qa = Array.isArray(p.questions_and_answers) ? p.questions_and_answers : [];
+  const phone =
+    p.text_reminder_number ||
+    (qa.find((x) => /phone|mobile|whats|cell/i.test(x.question || "")) || {}).answer ||
+    "";
+  const status = evt === "invitee.canceled" || p.status === "canceled" ? "Canceled" : "Booked";
+
+  const row = {
+    Timestamp: new Date().toISOString(),
+    "Booking status": status,
+    Event: se.name || "",
+    Invitee: p.name || [p.first_name, p.last_name].filter(Boolean).join(" "),
+    Email: p.email || "",
+    Phone: phone,
+    "Start (SAST)": toSAST(se.start_time),
+    "End (SAST)": toSAST(se.end_time),
+    Location: fmtLocation(se.location),
+    Timezone: p.timezone || "",
+    "Reschedule URL": p.reschedule_url || "",
+    "Cancel URL": p.cancel_url || "",
+  };
+  for (const x of qa) if (x && x.question) row[("Q: " + x.question).slice(0, 90)] = x.answer || "";
+
+  await postBooking(row);
+  console.log("Calendly booking synced:", evt, se.name, p.email);
+}
+
+app.post("/calendly", (req, res) => {
+  res.sendStatus(200); // ack immediately
+  try {
+    if (cfg.CALENDLY_WEBHOOK_SECRET && req.query.key !== cfg.CALENDLY_WEBHOOK_SECRET) {
+      return console.warn("Calendly webhook: missing/invalid key — ignored");
+    }
+    handleCalendlyEvent(req.body).catch((err) => console.error("Calendly handler error:", err));
+  } catch (err) { console.error("Calendly webhook parse error:", err); }
+});
+
+// One-time helper to register the Calendly webhook subscription.
+// Usage: set CALENDLY_PAT in your Render env, then open in a browser:
+//   https://<your-app>/calendly/setup?key=<CALENDLY_WEBHOOK_SECRET>
+// It creates an org-wide subscription for invitee.created/canceled pointing
+// back at /calendly. Remove CALENDLY_PAT afterwards if you like.
+app.get("/calendly/setup", async (req, res) => {
+  if (cfg.CALENDLY_WEBHOOK_SECRET && req.query.key !== cfg.CALENDLY_WEBHOOK_SECRET)
+    return res.status(403).send("Invalid or missing key.");
+  const pat = process.env.CALENDLY_PAT;
+  if (!pat) return res.status(400).send("Set CALENDLY_PAT in your environment first, then reload this page.");
+  if (!cfg.BASE_URL) return res.status(400).send("Set BASE_URL in your environment first.");
+  const CAL = "https://api.calendly.com";
+  const auth = { Authorization: `Bearer ${pat}`, "Content-Type": "application/json" };
+  try {
+    const me = await fetch(`${CAL}/users/me`, { headers: auth }).then((r) => r.json());
+    const org = me?.resource?.current_organization;
+    if (!org) return res.status(502).send("Could not read your Calendly organization. Check the token.");
+    const callback = `${cfg.BASE_URL}/calendly${cfg.CALENDLY_WEBHOOK_SECRET ? `?key=${encodeURIComponent(cfg.CALENDLY_WEBHOOK_SECRET)}` : ""}`;
+    const r = await fetch(`${CAL}/webhook_subscriptions`, {
+      method: "POST", headers: auth,
+      body: JSON.stringify({ url: callback, events: ["invitee.created", "invitee.canceled"], organization: org, scope: "organization" }),
+    });
+    const out = await r.json();
+    if (r.ok) return res.send(`<h2>✅ Calendly webhook created</h2><p>Bookings will now sync to your sheet.</p><pre>${callback}</pre>`);
+    if (r.status === 409 || /already/i.test(JSON.stringify(out)))
+      return res.send(`<h2>✅ Already set up</h2><p>A webhook for this URL already exists — nothing to do.</p>`);
+    return res.status(502).send(`<h2>Could not create webhook</h2><pre>${JSON.stringify(out, null, 2)}</pre>`);
+  } catch (err) {
+    return res.status(500).send("Error: " + err.message);
+  }
+});
+
 app.get("/", (_req, res) => res.send("MMG WhatsApp bot running"));
 
 if (require.main === module) app.listen(cfg.PORT, () => console.log(`MMG WhatsApp bot listening on port ${cfg.PORT}`));
 
-module.exports = { app, handleMessage, sessions, computeCollegeOutcome };
+module.exports = { app, handleMessage, sessions, computeCollegeOutcome, handleCalendlyEvent };
