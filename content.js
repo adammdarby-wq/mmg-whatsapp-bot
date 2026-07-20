@@ -96,6 +96,8 @@ const MESSAGES = {
     "Here are our contact details — tap the card above and choose *Call* to reach us right away (over your own network, or as a WhatsApp call). We look forward to speaking with you.",
   callbackDone:
     "Thank you. We've logged your callback request and a member of our team will call you at the time you requested.",
+  apptClarify:
+    "Sorry, I didn't quite catch that. Reply *NOW* to speak to someone by phone now, or let me know if you'd like to book an appointment (reply *YES*) or not (reply *NO*).",
 };
 
 // ---------------------------------------------------------------
@@ -145,6 +147,17 @@ function wantsHandoff(text) {
   const t = String(text || "").trim().toLowerCase();
   if (["call", "callback", "call back", "phone", "agent", "human", "call now", "speak", "talk"].includes(t)) return true;
   return HANDOFF_RE.test(t);
+}
+
+// Interpret the answer to the "appointment or speak now?" question.
+// Returns "now" (speak by phone now), "book" (make an appointment),
+// "no" (neither), or null (unclear -> ask again).
+function apptIntent(text) {
+  const s = String(text || "").toLowerCase().trim();
+  if (/\bnow\b|telephon|by phone|on the phone|call me|call now|speak.*now|right now|director|admissions|\bspeak\b.*(someone|member|team)/.test(s)) return "now";
+  if (/\bvisit\b|\bappointment\b|\bbook\b|schedule|arrange|\byes\b|^\s*1\b/.test(s)) return "book";
+  if (/^\s*(no|nope|nah|not|neither|none)\b/.test(s)) return "no";
+  return null;
 }
 
 // ---------------------------------------------------------------
@@ -257,15 +270,19 @@ function collegeBookingUrl(finalArr, preference) {
 // `skipIf(answers)` optionally skips a question.
 // ---------------------------------------------------------------
 const SCHOOL_QUESTIONS = [
-  { field: "parent_name", text: "What is the parent's name?" },
-  { field: "parent_surname", text: "What is the parent's surname?" },
+  { field: "parent_name", text: "What is the parent's name and surname?" },
   { field: "child_name", text: "What is the name of your child?" },
   { field: "child_gender", text: "Is your child male or female?" },
   { field: "child_age", text: "How old is your child?" },
-  { field: "current_school", text: "Is your child at another school at present?" },
+  { field: "current_school", text: "Is your child at another school at present? If yes, where?" },
   { field: "start_when", text: "When would you like your child to begin?" },
   { field: "email", text: "What is your email address?" },
-  { field: "wants_appointment", text: "Would you like to book an appointment to visit the school? (Yes / No)" },
+  {
+    field: "wants_appointment",
+    text:
+      "Would you like to book an appointment to visit the school, or speak to a School Director telephonically now?\n\n" +
+      "Reply *VISIT* to book a visit, *NOW* to speak to a Director by phone, or *NO* if neither.",
+  },
 ];
 
 const COLLEGE_QUESTIONS = [
@@ -278,11 +295,17 @@ const COLLEGE_QUESTIONS = [
     text:
       "Are you aware that The College of Modern Montessori's courses are self-funded by students, and that it is the student's responsibility to arrange their own bursary, sponsorship or funding? (Yes / No)",
   },
-  { field: "wants_appointment", text: "Would you like to book an appointment to speak with us? (Yes / No)" },
+  {
+    field: "wants_appointment",
+    text:
+      "Would you like an appointment to speak with us, or would you like to speak with a member of the admissions team telephonically now?\n\n" +
+      "Reply *APPOINTMENT* to book, *NOW* to speak to someone by phone, or *NO* if neither.",
+  },
   {
     field: "appointment_preference",
     text: "Would you prefer your appointment to be:\n\n1. In person at the college\n2. Online\n3. A phone call",
-    skipIf: (a) => /^\s*(no|n|nope|not|nah)\b/i.test((a.wants_appointment || "").trim()),
+    // Only asked when they chose to book an appointment (not "now" or "no").
+    skipIf: (a) => a._apptIntent !== "book",
   },
 ];
 
@@ -336,4 +359,5 @@ module.exports = {
   schoolBookingUrl,
   collegeBookingUrl,
   wantsHandoff,
+  apptIntent,
 };

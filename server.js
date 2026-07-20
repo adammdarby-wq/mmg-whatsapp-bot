@@ -226,11 +226,12 @@ async function finishCapture(to) {
   }
 
   if (cap.flow === "school") {
-    const wantsAppt = isYes(a.wants_appointment);
+    const wantsNow = a._apptIntent === "now";
+    const wantsAppt = a._apptIntent === "book";
     const bookingUrl = wantsAppt ? C.schoolBookingUrl(cap.base.school, a.child_age) : "";
     const row = {
       Timestamp: new Date().toISOString(), WhatsApp: to, School: cap.base.schoolName,
-      "Parent name": a.parent_name, "Parent surname": a.parent_surname,
+      "Parent name & surname": a.parent_name,
       "Child name": a.child_name, Gender: a.child_gender, Age: a.child_age,
       "Currently at another school": a.current_school, "Preferred start": a.start_when,
       Email: a.email, "Wants appointment": a.wants_appointment,
@@ -238,14 +239,16 @@ async function finishCapture(to) {
     };
     await saveLead({
       to, sheetName: "School Leads", row,
-      legacy: { name: [a.parent_name, a.parent_surname].filter(Boolean).join(" "), email: a.email, study_options: cap.base.schoolName },
+      legacy: { name: a.parent_name, email: a.email, study_options: cap.base.schoolName },
     });
+    if (wantsNow) return sendCallNow(to);
     if (wantsAppt) return sendText(to, C.MESSAGES.appointmentSchool.replace("{{link}}", bookingUrl));
     return sendText(to, C.MESSAGES.schoolEnd);
   }
 
   // college
-  const wantsAppt = isYes(a.wants_appointment);
+  const wantsNow = a._apptIntent === "now";
+  const wantsAppt = a._apptIntent === "book";
   const bookingUrl = wantsAppt ? C.collegeBookingUrl(cap.base.finalArr, a.appointment_preference) : "";
   const row = {
     Timestamp: new Date().toISOString(), WhatsApp: to,
@@ -263,6 +266,7 @@ async function finishCapture(to) {
     to, sheetName: "College Leads", row,
     legacy: { name: a.name_surname, email: a.email, study_options: cap.base.finalLabel },
   });
+  if (wantsNow) return sendCallNow(to);
   if (wantsAppt) return sendText(to, C.MESSAGES.appointmentCollege.replace("{{link}}", bookingUrl));
   return sendText(to, C.MESSAGES.collegeEnd);
 }
@@ -398,9 +402,10 @@ async function handleMessage(msg) {
 
   if (msg.type === "text") {
     const text = (msg.text.body || "").trim();
-    // "Talk to a person" can be requested at any time (except mid-callback capture).
-    if (C.wantsHandoff(text) && !(s.state === "CAPTURE" && s.data.capture && s.data.capture.flow === "callback"))
-      return offerHandoff(to);
+    // "Talk to a person" can be requested any time EXCEPT mid lead-capture,
+    // where answers (e.g. "speak to someone now" on the appointment question)
+    // must reach the capture handler rather than re-trigger the hand-off.
+    if (C.wantsHandoff(text) && s.state !== "CAPTURE") return offerHandoff(to);
     if (/^(menu|hi|hello|start|good day|info|restart)$/i.test(text) || s.state === "NEW") return sendGreeting(to);
 
     if (s.state === "COLLEGE_SELECT") {
@@ -421,7 +426,21 @@ async function handleMessage(msg) {
     }
     if (s.state === "CAPTURE") {
       const cap = s.data.capture;
-      cap.answers[cap.questions[cap.idx].field] = text;
+      const field = cap.questions[cap.idx].field;
+      cap.answers[field] = text;
+
+      // The appointment question is a 3-way: book / speak now (hand-off) / no.
+      if (field === "wants_appointment" && (cap.flow === "school" || cap.flow === "college")) {
+        const intent = C.apptIntent(text);
+        if (!intent) return sendText(to, C.MESSAGES.apptClarify); // unclear -> ask again (keep idx)
+        cap.answers._apptIntent = intent;
+        cap.answers.wants_appointment =
+          intent === "now" ? "Requested a call now" : intent === "book" ? "Yes" : "No";
+        cap.idx++;
+        if (intent === "now") return finishCapture(to); // save the lead, then hand off to the call
+        return askNext(to);
+      }
+
       cap.idx++;
       return askNext(to);
     }
