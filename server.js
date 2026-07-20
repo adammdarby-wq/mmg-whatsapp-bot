@@ -123,6 +123,27 @@ function fmtLocation(loc) {
   return [loc.type, detail].filter(Boolean).join(": ");
 }
 
+// --- admin enquiry alerts (sent by the bot, not Apps Script) ----
+const notifyBody = (row) => Object.entries(row).map(([k, v]) => `${k}: ${v}`).join("\n");
+
+// Fire-and-forget: alert the admin by WhatsApp (CallMeBot) and email (FormSubmit).
+// Never throws; failures are logged and never block the user's conversation.
+function notifyAdmin(subject, body) {
+  if (cfg.CALLMEBOT_PHONE && cfg.CALLMEBOT_APIKEY) {
+    const url =
+      `https://api.callmebot.com/whatsapp.php?phone=${cfg.CALLMEBOT_PHONE}` +
+      `&text=${encodeURIComponent(subject + "\n\n" + body)}&apikey=${cfg.CALLMEBOT_APIKEY}`;
+    fetch(url).catch((e) => console.error("WhatsApp alert failed:", e.message));
+  }
+  if (cfg.NOTIFY_EMAIL) {
+    fetch(`https://formsubmit.co/ajax/${encodeURIComponent(cfg.NOTIFY_EMAIL)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ _subject: subject, message: body }),
+    }).catch((e) => console.error("Email alert failed:", e.message));
+  }
+}
+
 // ================================================================
 // College decision engine — matric gate + location redirects.
 // Priority: matric first, then location.
@@ -222,6 +243,7 @@ async function finishCapture(to) {
       to, sheetName: "Callback Requests", row,
       legacy: { name: a.callback_name, email: "", study_options: "Callback request" },
     });
+    notifyAdmin(`New callback request — ${a.callback_name || "unknown"}`, notifyBody(row));
     return sendText(to, C.MESSAGES.callbackDone);
   }
 
@@ -241,6 +263,7 @@ async function finishCapture(to) {
       to, sheetName: "School Leads", row,
       legacy: { name: a.parent_name, email: a.email, study_options: cap.base.schoolName },
     });
+    notifyAdmin(`New School enquiry — ${a.parent_name || "unknown"}`, notifyBody(row));
     if (wantsNow) return sendCallNow(to);
     if (wantsAppt) return sendText(to, C.MESSAGES.appointmentSchool.replace("{{link}}", bookingUrl));
     return sendText(to, C.MESSAGES.schoolEnd);
@@ -266,6 +289,7 @@ async function finishCapture(to) {
     to, sheetName: "College Leads", row,
     legacy: { name: a.name_surname, email: a.email, study_options: cap.base.finalLabel },
   });
+  notifyAdmin(`New College enquiry — ${a.name_surname || "unknown"}`, notifyBody(row));
   if (wantsNow) return sendCallNow(to);
   if (wantsAppt) return sendText(to, C.MESSAGES.appointmentCollege.replace("{{link}}", bookingUrl));
   return sendText(to, C.MESSAGES.collegeEnd);

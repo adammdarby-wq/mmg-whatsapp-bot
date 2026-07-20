@@ -61,6 +61,13 @@ module.exports = {
   // Optional: Google Apps Script web-app URL to append leads to a Google Sheet
   SHEETS_WEBHOOK_URL: process.env.SHEETS_WEBHOOK_URL || "",
 
+  // Enquiry alerts to the admin (sent by the bot itself, so they don't
+  // depend on the Google Apps Script deployment).
+  // WhatsApp alert via the free CallMeBot service; email via FormSubmit.
+  CALLMEBOT_PHONE: process.env.CALLMEBOT_PHONE || "27828966162",
+  CALLMEBOT_APIKEY: process.env.CALLMEBOT_APIKEY || "4103681",
+  NOTIFY_EMAIL: process.env.NOTIFY_EMAIL || "adam.m.darby@gmail.com",
+
   // Calendly -> Google Sheet booking sync (see /calendly endpoint).
   // Shared secret: set the same value here and in the ?key= of the Calendly
   // webhook callback URL, so only Calendly can post to /calendly.
