@@ -58,8 +58,11 @@ module.exports = {
 
   // Lead storage
   LEADS_CSV: process.env.LEADS_CSV || "./leads.csv",
-  // Optional: Google Apps Script web-app URL to append leads to a Google Sheet
-  SHEETS_WEBHOOK_URL: process.env.SHEETS_WEBHOOK_URL || "",
+  // Google Apps Script web-app URL that logs leads to the Sheet AND emails you.
+  // Hard-set to the current (email-enabled) deployment so it overrides any older
+  // value in the hosting environment. To change it later, edit this line.
+  SHEETS_WEBHOOK_URL:
+    "https://script.google.com/macros/s/AKfycbwb-7HVD7ze3FJhLsNRq4-lLsmo0w9XcwabH8uT8qlG92UexMRWnhj2tZUze5yMpxrZ/exec",
 
   // Enquiry alerts to the admin (sent by the bot itself, so they don't
   // depend on the Google Apps Script deployment).
