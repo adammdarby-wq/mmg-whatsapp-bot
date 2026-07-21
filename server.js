@@ -126,20 +126,30 @@ function fmtLocation(loc) {
 // --- admin enquiry alerts (sent by the bot, not Apps Script) ----
 const notifyBody = (row) => Object.entries(row).map(([k, v]) => `${k}: ${v}`).join("\n");
 
-// Fire-and-forget: alert the admin by WhatsApp (CallMeBot) and email (FormSubmit).
+// Fire-and-forget: alert the admin by WhatsApp (CallMeBot) and email.
 // Never throws; failures are logged and never block the user's conversation.
 function notifyAdmin(subject, body) {
+  // WhatsApp: keep it SHORT — CallMeBot drops long messages. Full details go
+  // to email and the Google Sheet.
   if (cfg.CALLMEBOT_PHONE && cfg.CALLMEBOT_APIKEY) {
+    const waText = (subject + "\nDetails are in your email and Google Sheet.").slice(0, 300);
     const url =
       `https://api.callmebot.com/whatsapp.php?phone=${cfg.CALLMEBOT_PHONE}` +
-      `&text=${encodeURIComponent(subject + "\n\n" + body)}&apikey=${cfg.CALLMEBOT_APIKEY}`;
+      `&text=${encodeURIComponent(waText)}&apikey=${cfg.CALLMEBOT_APIKEY}`;
     fetch(url).catch((e) => console.error("WhatsApp alert failed:", e.message));
   }
-  if (cfg.NOTIFY_EMAIL) {
-    fetch(`https://formsubmit.co/ajax/${encodeURIComponent(cfg.NOTIFY_EMAIL)}`, {
+  // Email via Web3Forms (reliable server-side). Needs a free access key.
+  if (cfg.NOTIFY_EMAIL && cfg.WEB3FORMS_KEY) {
+    fetch("https://api.web3forms.com/submit", {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ _subject: subject, message: body }),
+      body: JSON.stringify({
+        access_key: cfg.WEB3FORMS_KEY,
+        subject: subject,
+        from_name: "Modern Montessori bot",
+        email: cfg.NOTIFY_EMAIL,
+        message: subject + "\n\n" + body,
+      }),
     }).catch((e) => console.error("Email alert failed:", e.message));
   }
 }

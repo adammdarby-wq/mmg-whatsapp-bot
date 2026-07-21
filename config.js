@@ -67,6 +67,8 @@ module.exports = {
   CALLMEBOT_PHONE: process.env.CALLMEBOT_PHONE || "27828966162",
   CALLMEBOT_APIKEY: process.env.CALLMEBOT_APIKEY || "4103681",
   NOTIFY_EMAIL: process.env.NOTIFY_EMAIL || "adam.m.darby@gmail.com",
+  // Free Web3Forms access key for email alerts (get one at web3forms.com).
+  WEB3FORMS_KEY: process.env.WEB3FORMS_KEY || "",
 
   // Calendly -> Google Sheet booking sync (see /calendly endpoint).
   // Shared secret: set the same value here and in the ?key= of the Calendly
